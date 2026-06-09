@@ -26,6 +26,7 @@ ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 ADMIN_PASSWORD = "200903ss"  # <-- впишите свой пароль
 
 DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.json")
+USERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "users.json")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -72,6 +73,23 @@ def load_data() -> dict:
 def save_data(data: dict):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+def save_user(chat_id: int):
+    users = []
+    if os.path.exists(USERS_FILE):
+        try:
+            with open(USERS_FILE, "r", encoding="utf-8") as f:
+                users = json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load users.json: {e}")
+    
+    if chat_id not in users:
+        users.append(chat_id)
+        try:
+            with open(USERS_FILE, "w", encoding="utf-8") as f:
+                json.dump(users, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save users.json: {e}")
 
 app_data = load_data()
 
@@ -137,6 +155,9 @@ class AdminStates(StatesGroup):
     edit_course_value = State()
     # AI rules
     add_rule = State()
+    # Broadcast
+    waiting_broadcast_text = State()
+    waiting_broadcast_confirm = State()
 
 # ============================================================
 #  KEYBOARDS — CLIENT
@@ -177,6 +198,7 @@ def admin_main_kb():
     builder.row(types.InlineKeyboardButton(text="📚 Курсы", callback_data="adm_courses"))
     builder.row(types.InlineKeyboardButton(text="🤖 Правила ИИ", callback_data="adm_rules"))
     builder.row(types.InlineKeyboardButton(text="📊 Статистика", callback_data="adm_stats"))
+    builder.row(types.InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast"))
     builder.row(types.InlineKeyboardButton(text="🚪 Выйти", callback_data="adm_exit"))
     return builder.as_markup()
 
@@ -234,6 +256,7 @@ def is_admin(user_id: int) -> bool:
 # ============================================================
 @router.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
+    save_user(message.chat.id)
     await state.clear()
     await message.answer(
         "Приветствуем вас в боте **Salymbekov Business School (SBS)**! 🎓🌟\n\n"
@@ -624,6 +647,90 @@ async def adm_stats(cb: types.CallbackQuery):
     builder = InlineKeyboardBuilder()
     builder.row(types.InlineKeyboardButton(text="◀️ Назад", callback_data="adm_back"))
     await cb.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+
+# ============================================================
+#  ADMIN — BROADCAST (РАССЫЛКА)
+# ============================================================
+@router.callback_query(F.data == "adm_broadcast")
+async def adm_broadcast_start(cb: types.CallbackQuery, state: FSMContext):
+    if not is_admin(cb.from_user.id): return await cb.answer("⛔")
+    await state.set_state(AdminStates.waiting_broadcast_text)
+    await cb.message.answer("📝 Введите текст сообщения для рассылки:", reply_markup=get_cancel_keyboard())
+    await cb.answer()
+
+@router.message(AdminStates.waiting_broadcast_text)
+async def adm_broadcast_text_received(message: types.Message, state: FSMContext):
+    if not message.text:
+        return await message.answer("Пожалуйста, отправьте текстовое сообщение для рассылки:")
+    
+    broadcast_text = message.text.strip()
+    await state.update_data(broadcast_text=broadcast_text)
+    await state.set_state(AdminStates.waiting_broadcast_confirm)
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        types.InlineKeyboardButton(text="✅ Да, отправить", callback_data="confirm_broadcast_yes"),
+        types.InlineKeyboardButton(text="❌ Отмена", callback_data="confirm_broadcast_no")
+    )
+    
+    await message.answer(
+        f"⚠️ **Подтвердите отправку сообщения всем пользователям:**\n\n💬 {broadcast_text}",
+        reply_markup=builder.as_markup()
+    )
+
+@router.callback_query(F.data == "confirm_broadcast_no")
+async def adm_broadcast_cancel(cb: types.CallbackQuery, state: FSMContext):
+    if not is_admin(cb.from_user.id): return await cb.answer("⛔")
+    await state.clear()
+    await cb.message.edit_text("❌ Рассылка отменена.", reply_markup=admin_main_kb())
+    await cb.answer()
+
+@router.callback_query(F.data == "confirm_broadcast_yes")
+async def adm_broadcast_execute(cb: types.CallbackQuery, state: FSMContext):
+    if not is_admin(cb.from_user.id): return await cb.answer("⛔")
+    
+    data = await state.get_data()
+    broadcast_text = data.get("broadcast_text")
+    await state.clear()
+    
+    if not broadcast_text:
+        await cb.answer("Ошибка: пустое сообщение.", show_alert=True)
+        return await cb.message.edit_text("❌ Не удалось отправить пустое сообщение.", reply_markup=admin_main_kb())
+    
+    # Read users
+    users = []
+    if os.path.exists(USERS_FILE):
+        try:
+            with open(USERS_FILE, "r", encoding="utf-8") as f:
+                users = json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load users.json: {e}")
+            
+    if not users:
+        await cb.answer("Нет пользователей в базе данных.", show_alert=True)
+        return await cb.message.edit_text("❌ База данных пользователей пуста.", reply_markup=admin_main_kb())
+        
+    await cb.message.edit_text("⏳ Идет рассылка сообщений...")
+    await cb.answer()
+    
+    success = 0
+    errors = 0
+    
+    for chat_id in users:
+        try:
+            await cb.bot.send_message(chat_id=chat_id, text=broadcast_text)
+            success += 1
+            await asyncio.sleep(0.05) # Respect limits
+        except Exception as e:
+            logger.error(f"Failed to send broadcast to {chat_id}: {e}")
+            errors += 1
+            
+    stats_text = (
+        f"📢 **Рассылка завершена!**\n\n"
+        f"✅ Отправлено: {success}\n"
+        f"❌ Ошибок: {errors}"
+    )
+    await cb.message.answer(stats_text, reply_markup=admin_main_kb(), parse_mode="Markdown")
 
 # ============================================================
 #  GEMINI AI HANDLER (fallback for free text)
