@@ -14,6 +14,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from google import genai
 from google.genai import types as genai_types
+import gspread
+from google.oauth2.service_account import Credentials
 
 # ============================================================
 #  CONFIG
@@ -104,7 +106,18 @@ def save_data(data: dict):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+def get_sheet():
+    scope = [
+        'https://spreadsheets.google.com/feeds',
+        'https://www.googleapis.com/auth/drive'
+    ]
+    creds = Credentials.from_service_account_file(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'credentials.json'), scopes=scope)
+    client = gspread.authorize(creds)
+    return client.open("SBS_Bot").sheet1
+
 def save_user(chat_id: int):
+    # Local save for broadcasting
     users = []
     if os.path.exists(USERS_FILE):
         try:
@@ -120,6 +133,15 @@ def save_user(chat_id: int):
                 json.dump(users, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.error(f"Failed to save users.json: {e}")
+
+    # Google Sheets save
+    try:
+        sheet = get_sheet()
+        existing = sheet.col_values(1)
+        if str(chat_id) not in existing:
+            sheet.append_row([str(chat_id)])
+    except Exception as e:
+        logger.error(f"Sheets error: {e}")
 
 app_data = load_data()
 
