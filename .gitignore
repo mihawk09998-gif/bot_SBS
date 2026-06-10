@@ -1,0 +1,17 @@
+# Google API credentials
+credentials.json
+
+# Local configurations / secrets
+.env
+
+# Python compilation files
+__pycache__/
+*.pyc
+
+# Python virtual environment
+venv/
+.venv/
+
+# Local databases / user state files
+data.json
+users.json
