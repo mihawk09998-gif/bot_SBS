@@ -53,7 +53,37 @@ DEFAULT_DATA = {
         {"id": "camp",     "name": "Летний лагерь (5в1)",         "age": "8-14 лет", "price": "3500 сом/смена", "desc": "Ораторское искусство, английский, скорочтение, лидерство, творчество."},
     ],
     "ai_rules": [],
-    "enrollments": []
+    "enrollments": [],
+    "faq": [
+        {
+            "keywords": ["цена", "стоимость", "сколько стоит"],
+            "answer": "📋 Наши курсы:\n🎒 Смартик (5-6 лет) — 4000 сом\n🎤 Ораторское — 3500 сом\n👑 БЛК — 3500 сом\n🇬🇧 Английский — 3500 сом\n☀️ Летний лагерь — 3500 сом"
+        },
+        {
+            "keywords": ["адрес", "где", "находитесь", "как найти"],
+            "answer": "📍 Каракол, ул. Алыбакова 158, 0-этаж\nОриентир: напротив тойкана Алтын Казына"
+        },
+        {
+            "keywords": ["телефон", "номер", "контакт", "связь"],
+            "answer": "📞 +996 701 000 712 (связь только по WhatsApp), 0505091285 (для обычных звонков)"
+        },
+        {
+            "keywords": ["расписание", "время", "когда", "занятия"],
+            "answer": "🕐 Занятия 5 дней в неделю\nпо 1-2 часа в день"
+        },
+        {
+            "keywords": ["возраст", "лет", "сколько лет ребенку"],
+            "answer": "👶 Смартик: 5-6 лет\n🎤 Ораторское: 8-16 лет\n👑 БЛК: 12-17 лет\n🇬🇧 Английский: 7-16 лет\n☀️ Летний лагерь: 8-14 лет"
+        },
+        {
+            "keywords": ["сертификат", "документ", "свидетельство"],
+            "answer": "🎓 По окончании курса выдаётся сертификат SBS"
+        },
+        {
+            "keywords": ["запись", "записаться", "как записать"],
+            "answer": "✍️ Нажмите кнопку Записаться ниже или напишите нам:\n📞 +996 701 000 712 (связь только по WhatsApp), 0505091285 (для обычных звонков)"
+        }
+    ]
 }
 
 def load_data() -> dict:
@@ -110,7 +140,7 @@ BASE_SYSTEM_PROMPT = """
 Информация о центре:
 - Название: Salymbekov Business School (SBS)
 - Адрес: г. Каракол, ул. Алыбакова 158, 0-й этаж
-- Контакты (WhatsApp/Telegram): +996 701 000 712
+- Контакты: +996 701 000 712 (связь только по WhatsApp), 0505091285 (для обычных звонков)
 """
 
 def build_system_instruction() -> str:
@@ -158,6 +188,9 @@ class AdminStates(StatesGroup):
     # Broadcast
     waiting_broadcast_text = State()
     waiting_broadcast_confirm = State()
+    # FAQ
+    add_faq_keywords = State()
+    add_faq_answer = State()
 
 # ============================================================
 #  KEYBOARDS — CLIENT
@@ -197,6 +230,7 @@ def admin_main_kb():
     builder = InlineKeyboardBuilder()
     builder.row(types.InlineKeyboardButton(text="📚 Курсы", callback_data="adm_courses"))
     builder.row(types.InlineKeyboardButton(text="🤖 Правила ИИ", callback_data="adm_rules"))
+    builder.row(types.InlineKeyboardButton(text="❓ Частые вопросы", callback_data="adm_faq"))
     builder.row(types.InlineKeyboardButton(text="📊 Статистика", callback_data="adm_stats"))
     builder.row(types.InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast"))
     builder.row(types.InlineKeyboardButton(text="🚪 Выйти", callback_data="adm_exit"))
@@ -272,7 +306,7 @@ async def cmd_about(message: types.Message, state: FSMContext):
         "🏫 **Salymbekov Business School (SBS)**\n\n"
         "Современный центр обучения и развития детей и подростков в Караколе.\n\n"
         "📍 **Адрес:** г. Каракол, ул. Алыбакова 158, 0-й этаж\n"
-        "📞 **WhatsApp/Telegram:** +996 701 000 712",
+        "📞 **Контакты:** +996 701 000 712 (связь только по WhatsApp), 0505091285 (для обычных звонков)",
         reply_markup=get_main_keyboard(), parse_mode="Markdown"
     )
 
@@ -733,6 +767,104 @@ async def adm_broadcast_execute(cb: types.CallbackQuery, state: FSMContext):
     await cb.message.answer(stats_text, reply_markup=admin_main_kb(), parse_mode="Markdown")
 
 # ============================================================
+#  ADMIN — FAQ (ЧАСТЫЕ ВОПРОСЫ)
+# ============================================================
+def admin_faq_kb():
+    builder = InlineKeyboardBuilder()
+    builder.row(types.InlineKeyboardButton(text="📋 Список вопросов", callback_data="adm_faq_list"))
+    builder.row(types.InlineKeyboardButton(text="➕ Добавить вопрос", callback_data="adm_faq_add"))
+    builder.row(types.InlineKeyboardButton(text="🗑 Удалить вопрос", callback_data="adm_faq_del_pick"))
+    builder.row(types.InlineKeyboardButton(text="◀️ Назад", callback_data="adm_back"))
+    return builder.as_markup()
+
+def faq_del_kb():
+    builder = InlineKeyboardBuilder()
+    faq_list = app_data.get("faq", [])
+    for i, item in enumerate(faq_list):
+        keywords_str = ", ".join(item["keywords"])
+        short = keywords_str[:40] + ("…" if len(keywords_str) > 40 else "")
+        builder.row(types.InlineKeyboardButton(text=f"🗑 {short}", callback_data=f"adm_faq_del_{i}"))
+    builder.row(types.InlineKeyboardButton(text="◀️ Назад", callback_data="adm_faq"))
+    return builder.as_markup()
+
+@router.callback_query(F.data == "adm_faq")
+async def adm_faq(cb: types.CallbackQuery):
+    if not is_admin(cb.from_user.id): return await cb.answer("⛔")
+    await cb.message.edit_text("❓ **Управление частыми вопросами (FAQ)**", reply_markup=admin_faq_kb(), parse_mode="Markdown")
+
+@router.callback_query(F.data == "adm_faq_list")
+async def adm_faq_list(cb: types.CallbackQuery):
+    if not is_admin(cb.from_user.id): return await cb.answer("⛔")
+    faq_list = app_data.get("faq", [])
+    if not faq_list:
+        text = "Список частых вопросов пуст."
+    else:
+        lines = []
+        for i, item in enumerate(faq_list, 1):
+            kw_str = ", ".join(item["keywords"])
+            lines.append(f"{i}. **Ключевые слова:** {kw_str}\n   **Ответ:** {item['answer']}")
+        text = "\n\n".join(lines)
+    await cb.message.edit_text(f"❓ **Частые вопросы (FAQ):**\n\n{text}", reply_markup=admin_faq_kb(), parse_mode="Markdown")
+
+@router.callback_query(F.data == "adm_faq_add")
+async def adm_faq_add(cb: types.CallbackQuery, state: FSMContext):
+    if not is_admin(cb.from_user.id): return await cb.answer("⛔")
+    await state.set_state(AdminStates.add_faq_keywords)
+    await cb.message.answer(
+        "Введите ключевые слова **через запятую**:\n"
+        "*(пример: цена, стоимость, сколько)*",
+        parse_mode="Markdown", reply_markup=get_cancel_keyboard()
+    )
+    await cb.answer()
+
+@router.message(AdminStates.add_faq_keywords)
+async def adm_add_faq_keywords(message: types.Message, state: FSMContext):
+    raw_text = message.text or ""
+    keywords = [kw.strip().lower() for kw in raw_text.split(",") if kw.strip()]
+    if not keywords:
+        return await message.answer("Пожалуйста, введите хотя бы одно ключевое слово:")
+    await state.update_data(faq_keywords=keywords)
+    await state.set_state(AdminStates.add_faq_answer)
+    await message.answer("Теперь введите **текст ответа** для этих ключевых слов:", parse_mode="Markdown")
+
+@router.message(AdminStates.add_faq_answer)
+async def adm_add_faq_answer(message: types.Message, state: FSMContext):
+    answer = (message.text or "").strip()
+    if not answer:
+        return await message.answer("Ответ не может быть пустым. Введите текст ответа:")
+    data = await state.get_data()
+    await state.clear()
+    
+    new_faq = {
+        "keywords": data["faq_keywords"],
+        "answer": answer
+    }
+    app_data.setdefault("faq", []).append(new_faq)
+    save_data(app_data)
+    await message.answer("✅ Частый вопрос успешно добавлен!", reply_markup=admin_main_kb())
+
+@router.callback_query(F.data == "adm_faq_del_pick")
+async def adm_faq_del_pick(cb: types.CallbackQuery):
+    if not is_admin(cb.from_user.id): return await cb.answer("⛔")
+    faq_list = app_data.get("faq", [])
+    if not faq_list:
+        return await cb.answer("Список вопросов пуст", show_alert=True)
+    await cb.message.edit_text("Выберите частый вопрос для удаления:", reply_markup=faq_del_kb())
+
+@router.callback_query(F.data.startswith("adm_faq_del_"))
+async def adm_faq_del(cb: types.CallbackQuery):
+    if not is_admin(cb.from_user.id): return await cb.answer("⛔")
+    idx = int(cb.data.replace("adm_faq_del_", ""))
+    faq_list = app_data.get("faq", [])
+    if 0 <= idx < len(faq_list):
+        removed = faq_list.pop(idx)
+        save_data(app_data)
+        kw_str = ", ".join(removed["keywords"])
+        await cb.message.edit_text(f"🗑 Удален вопрос с ключевыми словами:\n\"{kw_str}\"", reply_markup=admin_faq_kb())
+    else:
+        await cb.answer("Вопрос не найден", show_alert=True)
+
+# ============================================================
 #  GEMINI AI HANDLER (fallback for free text)
 # ============================================================
 @router.message(F.text)
@@ -745,10 +877,23 @@ async def handle_ai_query(message: types.Message, state: FSMContext):
         )
 
     user_query = message.text.strip()
+    user_query_lower = user_query.lower()
+
+    # FAQ Interception Layer
+    faq_list = app_data.get("faq", [])
+    for item in faq_list:
+        keywords = item.get("keywords", [])
+        for kw in keywords:
+            if kw and kw in user_query_lower:
+                try:
+                    await message.answer(item["answer"], reply_markup=get_main_keyboard(), parse_mode="Markdown")
+                except Exception:
+                    await message.answer(item["answer"], reply_markup=get_main_keyboard())
+                return
 
     if not client:
         return await message.answer(
-            "Этот вопрос вы можете обговорить, связавшись с директором: 0505091285",
+            "Этот вопрос вы можете обговорить, связавшись с директором по тел: +996 701 000 712 (связь только по WhatsApp), 0505091285 (для обычных звонков)",
             reply_markup=get_main_keyboard()
         )
 
@@ -788,7 +933,7 @@ async def handle_ai_query(message: types.Message, state: FSMContext):
     except Exception as e:
         logger.error(f"Gemini API Error: {e}", exc_info=True)
         await message.answer(
-            "Этот вопрос вы можете обговорить, связавшись с директором: 0505091285",
+            "Этот вопрос вы можете обговорить, связавшись с директором по тел: +996 701 000 712 (связь только по WhatsApp), 0505091285 (для обычных звонков)",
             reply_markup=get_main_keyboard()
         )
 
