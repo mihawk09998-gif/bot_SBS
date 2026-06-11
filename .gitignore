@@ -13,5 +13,4 @@ venv/
 .venv/
 
 # Local databases / user state files
-data.json
-users.json
+
