@@ -33,16 +33,8 @@ USERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "users.jso
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-CREDENTIALS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "credentials.json")
-google_creds_env = os.getenv("GOOGLE_CREDENTIALS")
-if google_creds_env:
-    try:
-        creds_data = json.loads(google_creds_env)
-        with open(CREDENTIALS_FILE, "w", encoding="utf-8") as f:
-            json.dump(creds_data, f, ensure_ascii=False, indent=2)
-        logger.info("Successfully created credentials.json from GOOGLE_CREDENTIALS environment variable.")
-    except Exception as e:
-        logger.error(f"Failed to create credentials.json from GOOGLE_CREDENTIALS: {e}")
+# CONFIG
+# ============================================================
 
 # Gemini client
 client = None
@@ -122,7 +114,17 @@ def get_sheet():
         'https://spreadsheets.google.com/feeds',
         'https://www.googleapis.com/auth/drive'
     ]
-    creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
+    
+    creds_json = os.getenv("GOOGLE_CREDENTIALS")
+    
+    if creds_json:
+        creds_dict = json.loads(creds_json)
+        creds = Credentials.from_service_account_info(
+            creds_dict, scopes=scope)
+    else:
+        creds = Credentials.from_service_account_file(
+            'credentials.json', scopes=scope)
+    
     client = gspread.authorize(creds)
     return client.open("SBS_Bot").sheet1
 
