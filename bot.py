@@ -163,20 +163,34 @@ app_data = load_data()
 #  DYNAMIC SYSTEM PROMPT BUILDER
 # ============================================================
 BASE_SYSTEM_PROMPT = """
-Ты — лучший эксперт по продажам в учебном центре Salymbekov Business School (SBS) в городе Каракол.
-Твоя миссия — не просто отвечать на вопросы, а вовлекать каждого пользователя и помогать ему принять решение о записи на наши курсы.
+Ты — менеджер центра SBS в Караколе. Отвечаешь коротко и по делу. Говори как живой человек, а не как робот.
 
-Твои правила работы:
-1. НИКОГДА не отправляй пользователя к менеджеру, если можешь ответить сам.
-2. В каждом ответе деликатно связывай запрос пользователя с пользой от обучения на наших курсах.
-3. Используй убедительный, вдохновляющий и дружелюбный тон. Пиши на языке вопроса, используй эмодзи.
-4. В конце каждого ответа используй призыв к действию (CTA): "Нажмите кнопку 'Записаться'".
-5. Если пользователь сомневается — подчеркни уникальность школы, интерактивные методики и индивидуальный подход.
+ПРАВИЛА:
+1. Сначала задай 1-2 вопроса, чтобы понять, что нужно клиенту:
+   - Сколько лет ребёнку?
+   - Что хотите развить?
+   
+2. После ответа предложи ОДИН подходящий курс. Не перечисляй все сразу.
 
-Информация о центре:
-- Название: Salymbekov Business School (SBS)
-- Адрес: г. Каракол, ул. Алыбакова 158, 0-й этаж
-- Контакты: +996 701 000 712 (связь только по WhatsApp), 0505091285 (для обычных звонков)
+3. Только если клиент заинтересовался — упомяни, что есть и другие курсы.
+
+4. Если у клиента несколько детей — сначала реши вопрос одного, потом предложи для остальных.
+
+5. Никогда не пиши длинные списки. Максимум 3-4 предложения за раз.
+
+6. Если вопрос не про курсы — отвечай кратко и возвращай к теме.
+
+7. При необходимости дать контакты центра используй: +996 701 000 712 (связь только по WhatsApp) или 0505091285 (для обычных звонков).
+
+ПРИМЕР ХОРОШЕГО ДИАЛОГА:
+Клиент: "здравствуйте"
+Бот: "Привет! 👋 Расскажите — для кого ищете курс и сколько лет ребёнку?"
+
+Клиент: "дочке 6 лет"
+Бот: "Отлично! Для неё идеально подойдёт Смартик — подготовка к школе. Читаем, считаем, пишем. 4000 сом в месяц. Хотите узнать подробнее?"
+
+ПЛОХОЙ ПРИМЕР (так не делать):
+"Здравствуйте! Добро пожаловать в SBS! У нас есть следующие курсы: 1. Смартик... 2. Ораторское... 3. БЛК..." — это плохо, слишком длинно.
 """
 
 def build_system_instruction() -> str:
@@ -185,9 +199,9 @@ def build_system_instruction() -> str:
     # Courses from data
     courses = app_data.get("courses", [])
     if courses:
-        lines = ["\nНаши курсы и цены:"]
+        lines = ["\nАКТИВНЫЕ КУРСЫ:"]
         for i, c in enumerate(courses, 1):
-            lines.append(f"  {i}. {c['name']} ({c['age']}) — {c['price']}. {c['desc']}")
+            lines.append(f"  - {c['name']} (возраст: {c['age']}, цена: {c['price']}) — {c['desc']}")
         parts.append("\n".join(lines))
 
     # Custom AI rules from admin
@@ -222,6 +236,8 @@ class AdminStates(StatesGroup):
     # AI rules
     add_rule = State()
     # Broadcast
+    waiting_broadcast_type = State()
+    waiting_broadcast_photo = State()
     waiting_broadcast_text = State()
     waiting_broadcast_confirm = State()
     # FAQ
@@ -724,16 +740,58 @@ async def adm_stats(cb: types.CallbackQuery):
 @router.callback_query(F.data == "adm_broadcast")
 async def adm_broadcast_start(cb: types.CallbackQuery, state: FSMContext):
     if not is_admin(cb.from_user.id): return await cb.answer("⛔")
+    await state.set_state(AdminStates.waiting_broadcast_type)
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        types.InlineKeyboardButton(text="📝 Только текст", callback_data="bc_type_text"),
+        types.InlineKeyboardButton(text="🖼 Фото + текст", callback_data="bc_type_photo")
+    )
+    builder.row(types.InlineKeyboardButton(text="◀️ Назад в админку", callback_data="adm_back"))
+    
+    await cb.message.edit_text(
+        "📢 **Выбор типа рассылки:**\n\n"
+        "Выберите, хотите ли вы отправить только текст или фото с подписью:",
+        reply_markup=builder.as_markup(),
+        parse_mode="Markdown"
+    )
+    await cb.answer()
+
+@router.callback_query(AdminStates.waiting_broadcast_type, F.data == "bc_type_text")
+async def bc_type_text_chosen(cb: types.CallbackQuery, state: FSMContext):
+    if not is_admin(cb.from_user.id): return await cb.answer("⛔")
     await state.set_state(AdminStates.waiting_broadcast_text)
+    await state.update_data(broadcast_photo=None)  # No photo
     await cb.message.answer("📝 Введите текст сообщения для рассылки:", reply_markup=get_cancel_keyboard())
     await cb.answer()
+
+@router.callback_query(AdminStates.waiting_broadcast_type, F.data == "bc_type_photo")
+async def bc_type_photo_chosen(cb: types.CallbackQuery, state: FSMContext):
+    if not is_admin(cb.from_user.id): return await cb.answer("⛔")
+    await state.set_state(AdminStates.waiting_broadcast_photo)
+    await cb.message.answer("🖼 Отправьте изображение (фото) для рассылки:", reply_markup=get_cancel_keyboard())
+    await cb.answer()
+
+@router.message(AdminStates.waiting_broadcast_photo, F.photo)
+async def bc_photo_received(message: types.Message, state: FSMContext):
+    photo_id = message.photo[-1].file_id
+    await state.update_data(broadcast_photo=photo_id)
+    await state.set_state(AdminStates.waiting_broadcast_text)
+    await message.answer("📝 Теперь введите текст подписи под фото:", reply_markup=get_cancel_keyboard())
+
+@router.message(AdminStates.waiting_broadcast_photo)
+async def bc_photo_invalid(message: types.Message):
+    await message.answer("Пожалуйста, отправьте именно изображение (фото) или нажмите Отмена:")
 
 @router.message(AdminStates.waiting_broadcast_text)
 async def adm_broadcast_text_received(message: types.Message, state: FSMContext):
     if not message.text:
-        return await message.answer("Пожалуйста, отправьте текстовое сообщение для рассылки:")
+        return await message.answer("Пожалуйста, отправьте текстовое сообщение:")
     
     broadcast_text = message.text.strip()
+    data = await state.get_data()
+    photo_id = data.get("broadcast_photo")
+    
     await state.update_data(broadcast_text=broadcast_text)
     await state.set_state(AdminStates.waiting_broadcast_confirm)
     
@@ -743,16 +801,24 @@ async def adm_broadcast_text_received(message: types.Message, state: FSMContext)
         types.InlineKeyboardButton(text="❌ Отмена", callback_data="confirm_broadcast_no")
     )
     
-    await message.answer(
-        f"⚠️ **Подтвердите отправку сообщения всем пользователям:**\n\n💬 {broadcast_text}",
-        reply_markup=builder.as_markup()
-    )
+    if photo_id:
+        await message.answer_photo(
+            photo=photo_id,
+            caption=f"⚠️ **Подтвердите отправку рассылки с фото:**\n\n💬 {broadcast_text}",
+            reply_markup=builder.as_markup()
+        )
+    else:
+        await message.answer(
+            f"⚠️ **Подтвердите отправку сообщения всем пользователям:**\n\n💬 {broadcast_text}",
+            reply_markup=builder.as_markup()
+        )
 
 @router.callback_query(F.data == "confirm_broadcast_no")
 async def adm_broadcast_cancel(cb: types.CallbackQuery, state: FSMContext):
     if not is_admin(cb.from_user.id): return await cb.answer("⛔")
     await state.clear()
-    await cb.message.edit_text("❌ Рассылка отменена.", reply_markup=admin_main_kb())
+    await cb.message.answer("❌ Рассылка отменена.", reply_markup=admin_main_kb())
+    await cb.message.delete()
     await cb.answer()
 
 @router.callback_query(F.data == "confirm_broadcast_yes")
@@ -761,11 +827,12 @@ async def adm_broadcast_execute(cb: types.CallbackQuery, state: FSMContext):
     
     data = await state.get_data()
     broadcast_text = data.get("broadcast_text")
+    photo_id = data.get("broadcast_photo")
     await state.clear()
     
     if not broadcast_text:
         await cb.answer("Ошибка: пустое сообщение.", show_alert=True)
-        return await cb.message.edit_text("❌ Не удалось отправить пустое сообщение.", reply_markup=admin_main_kb())
+        return await cb.message.answer("❌ Не удалось отправить рассылку.", reply_markup=admin_main_kb())
     
     # Read users
     users = []
@@ -778,9 +845,9 @@ async def adm_broadcast_execute(cb: types.CallbackQuery, state: FSMContext):
             
     if not users:
         await cb.answer("Нет пользователей в базе данных.", show_alert=True)
-        return await cb.message.edit_text("❌ База данных пользователей пуста.", reply_markup=admin_main_kb())
+        return await cb.message.answer("❌ База данных пользователей пуста.", reply_markup=admin_main_kb())
         
-    await cb.message.edit_text("⏳ Идет рассылка сообщений...")
+    status_msg = await cb.message.answer("⏳ Идет рассылка сообщений...")
     await cb.answer()
     
     success = 0
@@ -788,7 +855,10 @@ async def adm_broadcast_execute(cb: types.CallbackQuery, state: FSMContext):
     
     for chat_id in users:
         try:
-            await cb.bot.send_message(chat_id=chat_id, text=broadcast_text)
+            if photo_id:
+                await cb.bot.send_photo(chat_id=chat_id, photo=photo_id, caption=broadcast_text)
+            else:
+                await cb.bot.send_message(chat_id=chat_id, text=broadcast_text)
             success += 1
             await asyncio.sleep(0.05) # Respect limits
         except Exception as e:
@@ -800,6 +870,7 @@ async def adm_broadcast_execute(cb: types.CallbackQuery, state: FSMContext):
         f"✅ Отправлено: {success}\n"
         f"❌ Ошибок: {errors}"
     )
+    await status_msg.delete()
     await cb.message.answer(stats_text, reply_markup=admin_main_kb(), parse_mode="Markdown")
 
 # ============================================================
