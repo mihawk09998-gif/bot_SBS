@@ -16,6 +16,7 @@ from google import genai
 from google.genai import types as genai_types
 import gspread
 from google.oauth2.service_account import Credentials
+from aiohttp import web
 
 # ============================================================
 #  CONFIG
@@ -129,6 +130,79 @@ def get_sheet():
     
     client = gspread.authorize(creds)
     return client.open("SBS_Bot").sheet1
+
+def get_analytics_sheet():
+    scope = [
+        'https://spreadsheets.google.com/feeds',
+        'https://www.googleapis.com/auth/drive'
+    ]
+    
+    creds_json = os.getenv("GOOGLE_CREDENTIALS")
+    
+    if creds_json:
+        creds_dict = json.loads(creds_json)
+        if 'private_key' in creds_dict:
+            creds_dict['private_key'] = creds_dict['private_key'].replace('\\n', '\n')
+        creds = Credentials.from_service_account_info(
+            creds_dict, scopes=scope)
+    else:
+        creds = Credentials.from_service_account_file(
+            'credentials.json', scopes=scope)
+    
+    client = gspread.authorize(creds)
+    spreadsheet = client.open("SBS_Bot")
+    try:
+        return spreadsheet.worksheet("analytics")
+    except gspread.exceptions.WorksheetNotFound:
+        wks = spreadsheet.add_worksheet(title="analytics", rows=1000, cols=3)
+        wks.append_row(["Дата", "Событие", "Chat_ID"])
+        return wks
+
+async def track_event(chat_id: int, event: str):
+    def sync_log():
+        try:
+            sheet = get_analytics_sheet()
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+            sheet.append_row([timestamp, event, str(chat_id)])
+        except Exception as err:
+            logger.error(f"Failed to log event {event} to sheets: {err}")
+            
+    await asyncio.to_thread(sync_log)
+
+async def track_site_event(request):
+    if request.method == "OPTIONS":
+        return web.Response(
+            status=200,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type"
+            }
+        )
+    try:
+        data = await request.json()
+        event = data.get("event")
+        page = data.get("page", "")
+        await track_event(0, f"site_{event}_{page}")
+        return web.Response(
+            text="ok",
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type"
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error in track_site_event: {e}")
+        return web.Response(
+            text="error",
+            status=400,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type"
+            }
+        )
 
 def save_user(chat_id: int):
     # Local save for broadcasting
@@ -283,7 +357,10 @@ def admin_main_kb():
     builder.row(types.InlineKeyboardButton(text="📚 Курсы", callback_data="adm_courses"))
     builder.row(types.InlineKeyboardButton(text="🤖 Правила ИИ", callback_data="adm_rules"))
     builder.row(types.InlineKeyboardButton(text="❓ Частые вопросы", callback_data="adm_faq"))
-    builder.row(types.InlineKeyboardButton(text="📊 Статистика", callback_data="adm_stats"))
+    builder.row(
+        types.InlineKeyboardButton(text="📊 Статистика", callback_data="adm_stats"),
+        types.InlineKeyboardButton(text="📊 Аналитика сайта", callback_data="adm_analytics")
+    )
     builder.row(types.InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast"))
     builder.row(types.InlineKeyboardButton(text="🚪 Выйти", callback_data="adm_exit"))
     return builder.as_markup()
@@ -343,6 +420,7 @@ def is_admin(user_id: int) -> bool:
 @router.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
     save_user(message.chat.id)
+    await track_event(message.chat.id, "start")
     await state.clear()
     await message.answer(
         "Приветствуем вас в боте **Salymbekov Business School (SBS)**! 🎓🌟\n\n"
@@ -403,6 +481,8 @@ async def cancel_handler(message: types.Message, state: FSMContext):
 # ============================================================
 @router.message(F.text == "✍️ Записаться")
 async def start_reg(message: types.Message, state: FSMContext):
+    await track_event(message.chat.id, "clicked_enroll")
+    await track_event(message.chat.id, "form_started")
     await state.clear()
     await state.set_state(Registration.waiting_for_name)
     await message.answer("📝 **Запись на курс**\n\nВаше имя (ФИО родителя):", reply_markup=get_cancel_keyboard(), parse_mode="Markdown")
@@ -470,6 +550,8 @@ async def reg_course(callback: types.CallbackQuery, state: FSMContext):
     }
     app_data.setdefault("enrollments", []).append(enrollment)
     save_data(app_data)
+    
+    await track_event(callback.message.chat.id, "form_completed")
 
     confirm = (
         f"🎉 **Запись оформлена!**\n\n"
@@ -733,6 +815,80 @@ async def adm_stats(cb: types.CallbackQuery):
     builder = InlineKeyboardBuilder()
     builder.row(types.InlineKeyboardButton(text="◀️ Назад", callback_data="adm_back"))
     await cb.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+
+# ============================================================
+#  ADMIN — ANALYTICS
+# ============================================================
+@router.callback_query(F.data == "adm_analytics")
+async def adm_analytics(cb: types.CallbackQuery):
+    if not is_admin(cb.from_user.id): return await cb.answer("⛔")
+    
+    await cb.message.edit_text("⏳ Загрузка аналитики из Google Sheets...")
+    await cb.answer()
+    
+    try:
+        def fetch_data():
+            sheet = get_analytics_sheet()
+            return sheet.get_all_values()
+            
+        rows = await asyncio.to_thread(fetch_data)
+        
+        today_str = date.today().strftime("%Y-%m-%d")
+        
+        today_views = 0
+        today_click_enroll = 0
+        today_bot_start = 0
+        today_completed = 0
+        
+        total_views = 0
+        total_completed = 0
+        
+        if len(rows) > 1:
+            for r in rows[1:]:
+                if len(r) < 2:
+                    continue
+                dt_val, ev = r[0], r[1]
+                is_today = dt_val.startswith(today_str)
+                
+                if ev.startswith("site_pageview_"):
+                    total_views += 1
+                    if is_today:
+                        today_views += 1
+                elif ev == "site_click_enroll_site" or ev.startswith("site_click_enroll"):
+                    if is_today:
+                        today_click_enroll += 1
+                elif ev == "start":
+                    if is_today:
+                        today_bot_start += 1
+                elif ev == "form_completed":
+                    total_completed += 1
+                    if is_today:
+                        today_completed += 1
+                        
+        conversion = (today_completed / today_views * 100) if today_views > 0 else 0.0
+        
+        text = (
+            f"📊 **Аналитика сайта**\n\n"
+            f"📅 **За сегодня:**\n"
+            f"🌐 Просмотров сайта: **{today_views}**\n"
+            f"👆 Кликов \"Записаться\": **{today_click_enroll}**\n"
+            f"🤖 Написали боту: **{today_bot_start}**\n"
+            f"📝 Оставили заявку: **{today_completed}**\n"
+            f"📈 Конверсия сайт→заявка: **{conversion:.1f}%**\n\n"
+            f"📊 **За всё время:**\n"
+            f"🌐 Всего просмотров: **{total_views}**\n"
+            f"✅ Всего заявок: **{total_completed}**"
+        )
+        
+        builder = InlineKeyboardBuilder()
+        builder.row(types.InlineKeyboardButton(text="◀️ Назад", callback_data="adm_back"))
+        
+        await cb.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Failed to load analytics: {e}")
+        builder = InlineKeyboardBuilder()
+        builder.row(types.InlineKeyboardButton(text="◀️ Назад", callback_data="adm_back"))
+        await cb.message.edit_text(f"❌ Ошибка загрузки аналитики: {e}", reply_markup=builder.as_markup())
 
 # ============================================================
 #  ADMIN — BROADCAST (РАССЫЛКА)
@@ -1055,10 +1211,21 @@ async def main():
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
     await bot.delete_webhook(drop_pending_updates=True)
+
+    # Run aiohttp server on port 8080
+    app = web.Application()
+    app.router.add_route('*', '/track', track_site_event)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+    logger.info("Aiohttp web server started on port 8080...")
+
     logger.info("Bot starting with polling...")
     try:
         await dp.start_polling(bot)
     finally:
+        await runner.cleanup()
         await bot.session.close()
 
 if __name__ == "__main__":
